@@ -1,26 +1,17 @@
-# app.py
 # Don't Remove Credit @teacher_slex
 # Subscribe YouTube ƈɦǟռռɛʟ For Amazing Bot @Tech_VJ
 # Ask Doubt on telegram @KingVJ01
 
-import os
-import re
-import asyncio
-import logging
-
-from aiohttp import web
-from pyrogram import Client, filters, idle, errors
 from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram import filters, Client, errors
 from pyrogram.errors.exceptions.flood_420 import FloodWait
-
 from database import add_user, add_group, all_users, all_groups, users
 from configs import cfg
+import asyncio
+import time
+import os
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
-
-# ---------- Telegram client ----------
-tg = Client(
+app = Client(
     "approver",
     api_id=cfg.API_ID,
     api_hash=cfg.API_HASH,
@@ -29,14 +20,14 @@ tg = Client(
 
 #━━━━━━━━━━━━━━━━━━━━ HELPER ━━━━━━━━━━━━━━━━━━━━
 def parse_post_link(link: str):
-    parts = link.rstrip("/").split("/")
+    parts = link.split("/")
     chat = parts[-2]
     msg_id = int(parts[-1])
     return chat, msg_id
 
-#━━━━━━━━━━━━━━━━━━━━ JOIN REQUEST (AUTO APPROVE + OLD DM) ━━━━━━━━━━━━━━━━━━━━
-@tg.on_chat_join_request(filters.group | filters.channel)
-async def approve(_, m):
+#━━━━━━━━━━━━━━━━━━━━ JOIN REQUEST (AUTO APPROVE WITH 10s DELAY + LOG) ━━━━━━━━━━━━━━━━━━━━
+@app.on_chat_join_request(filters.group | filters.channel)
+async def approve(_, m: Message):
     op = m.chat
     user = m.from_user
 
@@ -44,55 +35,89 @@ async def approve(_, m):
         add_group(op.id)
         add_user(user.id)
 
-        # ✅ JOIN REQUEST ACCEPT
-        await tg.approve_chat_join_request(op.id, user.id)
-
-        # ✅ SAME OLD DM MESSAGE
+        # 📝 Save ID + Time in log (one per line: user_id|timestamp)
+        request_time = int(time.time())
         try:
-            await tg.send_message(
-                user.id,
-                f"👋 Hello • {user.first_name}\n\n"
-                "🥀 Aapka join request approve ho gaya hai.\n"
-                "⚡️ Important info niche aa gayi hai 👇"
-            )
-        except Exception:
-            # user might have privacy settings; ignore
-            pass
+            with open("log.txt", "a") as f:
+                f.write(f"{user.id}|{request_time}\n")
+        except Exception as e:
+            print("Log write error:", e)
 
-        # ✅ PROMO / POSTS SEND (if cfg.POSTS present)
-        for link in getattr(cfg, "POSTS", []) or []:
+        # ⏳ Wait 10 seconds before approving
+        await asyncio.sleep(1)
+
+        # ✅ Attempt to approve the join request (bot must be admin with right)
+        try:
+            await app.approve_chat_join_request(op.id, user.id)
+        except FloodWait as fw:
+            # If flood wait, sleep required seconds then retry
+            await asyncio.sleep(fw.value)
+            try:
+                await app.approve_chat_join_request(op.id, user.id)
+            except Exception as e:
+                print("Approve retry failed:", e)
+        except errors.PeerIdInvalid:
+            # invalid peer/user id; can't DM or approve
+            print("PeerIdInvalid for user:", user.id)
+        except Exception as e:
+            print("Approve error:", e)
+
+        # 📩 Send Approved Message (try/except because user may have privacy settings)
+        try:
+            await app.send_message(
+                user.id,
+                f"👋 𝗪𝗲𝗹𝗰𝗼𝗺𝗲 {user.first_name}\n\n"
+            )
+        except Exception as e:
+            # can't DM user — ignore silently or log
+            print("Send DM failed:", e)
+
+        # ✅ Optional: Send configured POSTS to user (same as original behavior)
+        for link in getattr(cfg, "POSTS", []):
             try:
                 chat_id, msg_id = parse_post_link(link)
-                await tg.copy_message(
+                await app.copy_message(
                     chat_id=user.id,
                     from_chat_id=chat_id,
                     message_id=msg_id
                 )
                 await asyncio.sleep(1)
             except Exception:
+                # ignore individual copy errors
                 pass
 
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-    except errors.PeerIdInvalid:
-        pass
-    except Exception:
-        log.exception("Error in approve handler")
+        # 🗑 Remove user from log after approval
+        try:
+            if os.path.exists("log.txt"):
+                with open("log.txt", "r") as f:
+                    lines = f.readlines()
+                with open("log.txt", "w") as f:
+                    for line in lines:
+                        if not line.startswith(str(user.id) + "|"):
+                            f.write(line)
+        except Exception as e:
+            print("Log cleanup error:", e)
+
+    except Exception as e:
+        # generic catch (keep bot alive)
+        print("Join Handler Error:", e)
 
 #━━━━━━━━━━━━━━━━━━━━ START COMMAND ━━━━━━━━━━━━━━━━━━━━
-@tg.on_message(filters.private & filters.command("start"))
+@app.on_message(filters.private & filters.command("start"))
 async def start(_, m: Message):
     add_user(m.from_user.id)
 
+    # NORMAL USER
     if m.from_user.id not in cfg.SUDO:
         await m.reply_text(
             "𝐁𝐇𝐀𝐈 𝐇𝐀𝐂𝐊 𝐒𝐄 𝐏𝐋𝐀𝐘 𝐊𝐑𝐎\n\n💸𝐏𝐑𝐎𝐅𝐈𝐓 𝐊𝐑𝐎🍻"
         )
 
-        for link in getattr(cfg, "POSTS", []) or []:
+        # send configured posts (same as original)
+        for link in getattr(cfg, "POSTS", []):
             try:
                 chat_id, msg_id = parse_post_link(link)
-                await tg.copy_message(
+                await app.copy_message(
                     chat_id=m.from_user.id,
                     from_chat_id=chat_id,
                     message_id=msg_id
@@ -102,6 +127,7 @@ async def start(_, m: Message):
                 pass
         return
 
+    # ADMIN HOME (NO JOIN CHECK)
     keyboard = InlineKeyboardMarkup(
         [[
             InlineKeyboardButton("🗯 ƈɦǟռռɛʟ", url="https://t.me/lnx_store"),
@@ -123,68 +149,43 @@ async def start(_, m: Message):
     )
 
 #━━━━━━━━━━━━━━━━━━━━ USERS COUNT ━━━━━━━━━━━━━━━━━━━━
-@tg.on_message(filters.command("users") & filters.user(cfg.SUDO))
+@app.on_message(filters.command("users") & filters.user(cfg.SUDO))
 async def users_count(_, m: Message):
     u = all_users()
     g = all_groups()
     await m.reply_text(f"🙋 Users : `{u}`\n👥 Groups : `{g}`\n📊 Total : `{u+g}`")
 
-#━━━━━━━━━━━━━━━━━━━━ BROADCAST ━━━━━━━━━━━━━━━━━━━━
-@tg.on_message(filters.command("bcast") & filters.user(cfg.SUDO))
+#━━━━━━━━━━━━━━━━━━━━ BROADCAST COPY ━━━━━━━━━━━━━━━━━━━━
+@app.on_message(filters.command("bcast") & filters.user(cfg.SUDO))
 async def bcast(_, m: Message):
-    if not m.reply_to_message:
-        return await m.reply("Reply to a message to broadcast.")
-
     status = await m.reply("⚡ Broadcasting...")
     ok = fail = 0
-
-    # iterate over users collection cursor
     for u in users.find():
         try:
+            # will copy the replied message to each user id
             await m.reply_to_message.copy(u["user_id"])
             ok += 1
-            # small delay to reduce flood risk
-            await asyncio.sleep(0.05)
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
         except Exception:
             fail += 1
-
     await status.edit(f"✅ {ok} | ❌ {fail}")
 
-# ---------- Simple aiohttp web server so Render sees an open port ----------
-async def handle_index(request):
-    return web.Response(text="🤖 Bot is alive and running!")
-
-async def start_web_server(port: int):
-    web_app = web.Application()
-    web_app.router.add_get('/', handle_index)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    log.info(f"Web server started on port {port}")
-    return runner  # so we can cleanup later
-
-# ---------- Main: start bot + web in same event loop ----------
-async def main():
-    port = int(os.environ.get("PORT", "8080"))
-
-    # start the web server
-    web_runner = await start_web_server(port)
-
-    # start the telegram bot (pyrogram) client
-    await tg.start()
-    print("🤖 Bot is Alive!")
-
+#━━━━━━━━━━━━━━━━━━━━ 🚫 AUTO DELETE ILLEGAL BOT MSG (UNCHANGED) ━━━━━━━━━━━━━━━━━━━━
+@app.on_message(filters.me)
+async def auto_delete_illegal(_, m: Message):
     try:
-        await idle()  # keeps the client running
-    finally:
-        await tg.stop()
-        await web_runner.cleanup()
+        content = ""
+        if m.text:
+            content = m.text.lower()
+        elif m.caption:
+            content = m.caption.lower()
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
+        for word in cfg.ILLEGAL_WORDS:
+            if word.lower() in content:
+                await asyncio.sleep(0.1)
+                await m.delete()
+                return
+    except:
         pass
+
+print("🤖 Bot is Alive!")
+app.run()
